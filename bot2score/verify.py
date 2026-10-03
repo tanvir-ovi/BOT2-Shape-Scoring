@@ -38,12 +38,14 @@ def check_weights(D, P, keys=None, cfgs=None, device=None, log=print):
 
 
 def manifest(P, log=print):
-    """SHA-256 checksum, size and path of every file in the results folder except the input cache."""
+    """SHA-256 checksum, size and path of every result file except the input cache and the running logs."""
     rows = []
     for path in sorted(glob.glob(os.path.join(P.root, '**', '*'), recursive=True)):
-        if os.path.isfile(path) and not os.path.basename(path).startswith(('inputs_', 'manifest')):
-            rows.append({'File': os.path.relpath(path, P.root).replace(os.sep, '/'), 'Bytes': os.path.getsize(path),
-                         'SHA-256': sha256(path)})
+        rel = os.path.relpath(path, P.root).replace(os.sep, '/')
+        name = os.path.basename(path)
+        if os.path.isfile(path) and not name.startswith(('inputs_', 'manifest')) and not (rel.startswith('logs/') and
+                                                                                          name.endswith('.txt')):
+            rows.append({'File': rel, 'Bytes': os.path.getsize(path), 'SHA-256': sha256(path)})
     t = pd.DataFrame(rows)
     save_csv(t, os.path.join(P.root, 'manifest_sha256.csv'), index=False)
     log(f'Checksums of {len(t)} files written to manifest_sha256.csv')
