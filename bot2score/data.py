@@ -24,8 +24,8 @@ FACETS = {                                     # rubric criteria of every item, 
     'Overlapped pencils': ['basic', 'closure', 'edges', 'orientation', 'overlap', 'size'],
 }
 ITEMS = list(FACETS)                           # archive folder names in BOT-2 administration order
-ITEM_LABEL = {'Circle': 'Circle', 'Square': 'Square', 'Overlapped circle': 'Overlapping circles', 'Wave': 'Wavy line',
-              'Triangle': 'Triangle', 'Diagonal': 'Diamond', 'Star': 'Star', 'Overlapped pencils': 'Overlapping pencils'}
+ITEM_LABEL = {'Circle': 'Circle', 'Square': 'Square', 'Overlapped circle': 'Overlapped circles', 'Wave': 'Wave',
+              'Triangle': 'Triangle', 'Diagonal': 'Diamond', 'Star': 'Star', 'Overlapped pencils': 'Overlapped pencils'}
 CRITERIA = ['basic', 'closure', 'edges', 'orientation', 'overlap', 'size']
 CRITERION_LABEL = {'basic': 'Basic shape', 'closure': 'Closure', 'edges': 'Edges', 'orientation': 'Orientation',
                    'overlap': 'Overlap', 'size': 'Overall size'}
@@ -169,7 +169,7 @@ def prepare(zip_path, P, local_dir='/content/data', size=INPUT_SIZE, workers=Non
             f'{index_file} was written by a different build of the index'
     else:
         save_csv(df.drop(columns='path'), index_file, index=False)
-        save_csv(dropped, os.path.join(P.data, f'excluded_files{tag}.csv'), index=False)
+    save_csv(dropped, os.path.join(P.data, f'excluded_files{tag}.csv'), index=False)
 
     cache = os.path.join(P.data, f'inputs_{size}{tag}.npz')
     imgs = None

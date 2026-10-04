@@ -28,7 +28,7 @@ ROLE_NAME = {'proposed': 'Proposed ensemble', 'member': 'Ensemble member', 'base
 ROLE_ORDER = ('proposed', 'member', 'baseline', 'classifier', 'rules', 'reference')
 VERDICT_COLOR = {'different': GREEN, 'equivalent': BLUE, 'inconclusive': GREY}
 VERDICT_NAME = {'different': 'Different', 'equivalent': 'Equivalent within margin', 'inconclusive': 'Inconclusive'}
-SHORT = {'Overlapping circles': 'Overlapping\ncircles', 'Overlapping pencils': 'Overlapping\npencils'}
+SHORT = {'Overlapped circles': 'Overlapped\ncircles', 'Overlapped pencils': 'Overlapped\npencils'}
 PAIR_LABEL = {('dit_224', 'beit_natural'): 'Documents vs natural images',
               ('beit_sketch', 'beit_natural'): 'Sketches vs natural images',
               ('dit_224', 'beit_sketch'): 'Documents vs sketches', ('convnext_512', 'convnext_224'): '512 px vs 224 px',
