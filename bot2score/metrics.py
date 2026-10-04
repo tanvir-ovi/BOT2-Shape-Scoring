@@ -67,7 +67,8 @@ def mean_item_kappa(y, p, items, weights=None):
 
 
 def band(k):
-    """Landis and Koch label of a kappa value; each band includes its upper bound (0.61 to 0.80 is substantial)."""
+    """Landis and Koch label of a kappa value. Each band includes its upper bound: above 0.60 and up to 0.80 is
+    substantial, above 0.80 almost perfect, below 0 poor."""
     if not np.isfinite(k):
         return ''
     if k < 0:
