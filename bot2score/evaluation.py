@@ -293,7 +293,10 @@ def oof_embedding(D, P, key):
     return E
 
 
-def tsne(X, seed=SEED):
+THREAD_VARS = ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS')
+
+
+def _tsne(X, seed=SEED):
     from sklearn.decomposition import PCA
     from sklearn.manifold import TSNE
     X = (X - X.mean(0)) / (X.std(0) + 1e-6)
@@ -302,33 +305,69 @@ def tsne(X, seed=SEED):
                 random_state=seed).fit_transform(X)
 
 
-def separation(D, X, seed=SEED):
+def _separation(X, items, below, seed=SEED):
     """Separation of drawings at full marks from those below, measured in the embedding space before projection:
     leave-one-out 10-nearest-neighbour balanced accuracy within each item (mean over items), and the cosine
     silhouette of the two groups."""
     from sklearn.metrics import silhouette_score
     from sklearn.neighbors import NearestNeighbors
-    X = X.astype(np.float32)
-    below = D.score < D.kmax
     bal = []
     for i in range(N_ITEMS):
-        m = np.where(D.item == i)[0]
+        m = np.where(items == i)[0]
         if below[m].all() or (~below[m]).all() or len(m) < 12:
             continue
-        nn = NearestNeighbors(n_neighbors=11, metric='cosine').fit(X[m])
-        nb = nn.kneighbors(X[m], return_distance=False)[:, 1:]
-        vote = below[m][nb].mean(1) > 0.5
-        y = below[m]
+        nb = NearestNeighbors(n_neighbors=11, metric='cosine').fit(X[m]).kneighbors(X[m], return_distance=False)[:, 1:]
+        vote, y = below[m][nb].mean(1) > 0.5, below[m]
         bal.append(0.5 * (np.mean(vote[y]) + np.mean(~vote[~y])))
-    rng = np.random.default_rng(seed)
-    s = rng.choice(len(X), min(2000, len(X)), replace=False)
+    s = np.random.default_rng(seed).choice(len(X), min(2000, len(X)), replace=False)
     return {'kNN balanced accuracy': float(np.mean(bal)) if bal else np.nan,
             'Silhouette (cosine)': float(silhouette_score(X[s], below[s], metric='cosine'))}
 
 
+def _project_job(src, dst, seed):
+    """Runs in a fresh process: t-SNE coordinates and separation indices of one embedding."""
+    with np.load(src) as z:
+        X, items, below = z['X'].astype(np.float32), z['items'], z['below']
+    sep = _separation(X, items, below, seed)
+    np.savez(dst, xy=_tsne(X, seed), knn=sep['kNN balanced accuracy'], silhouette=sep['Silhouette (cosine)'])
+
+
+def project(X, items, below, seed=SEED, timeout_minutes=15, threads=4):
+    """t-SNE and separation indices in a fresh process with a few threads, so that thread pools left over from GPU
+    training cannot block them. After timeout_minutes the first two principal components are used instead."""
+    import multiprocessing as mp
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        src, dst = os.path.join(tmp, 'in.npz'), os.path.join(tmp, 'out.npz')
+        np.savez(src, X=X, items=items, below=below)
+        saved = {v: os.environ.get(v) for v in THREAD_VARS}
+        os.environ.update({v: str(threads) for v in THREAD_VARS})
+        try:
+            proc = mp.get_context('spawn').Process(target=_project_job, args=(src, dst, seed), daemon=True)
+            proc.start()
+        finally:
+            for v, old in saved.items():
+                if old is None:
+                    os.environ.pop(v, None)
+                else:
+                    os.environ[v] = old
+        proc.join(timeout_minutes * 60)
+        if proc.is_alive():
+            proc.terminate()
+            proc.join()
+        if proc.exitcode == 0 and os.path.exists(dst):
+            with np.load(dst) as z:
+                return z['xy'], {'kNN balanced accuracy': float(z['knn']),
+                                 'Silhouette (cosine)': float(z['silhouette'])}, 't-SNE'
+    Xc = (X - X.mean(0)) / (X.std(0) + 1e-6)
+    _, _, vt = np.linalg.svd(Xc, full_matrices=False)
+    return Xc @ vt[:2].T, {'kNN balanced accuracy': np.nan, 'Silhouette (cosine)': np.nan}, 'PCA'
+
+
 def embeddings(D, R, P, log=print):
-    """Stores the out-of-fold embedding of every network and projects three of them with t-SNE: the pretrained
-    ConvNeXt V2 before fine-tuning, the fine-tuned ConvNeXt V2 and the concatenated members of the ensemble."""
+    """Stores the out-of-fold embedding of every network and projects three of them with t-SNE (in a separate
+    process): the pretrained ConvNeXt V2 before fine-tuning, the fine-tuned ConvNeXt V2 and the concatenated members
+    of the ensemble."""
     E = {key: oof_embedding(D, P, key) for key in NETWORKS if key in R}
     for key, e in E.items():
         atomic_save(os.path.join(P.embeddings, f'{key}_oof{D.tag}.npy'), lambda p: np.save(p, e))
@@ -342,11 +381,14 @@ def embeddings(D, R, P, log=print):
         panels.append((PROPOSED, 'DPE members concatenated', np.hstack([E[m] for m in ENSEMBLE])))
     coords, sep = [], []
     for key, title, X in panels:
-        xy = tsne(X.astype(np.float32))
+        log(f'Projecting: {title}')
+        xy, idx, method = project(X.astype(np.float32), D.item, D.score < D.kmax)
+        if method != 't-SNE':
+            log(f'{title}: t-SNE did not finish, the panel shows the first two principal components')
+            title = f'{title} (PCA)'
         coords.append(pd.DataFrame({'Panel': key, 'Title': title, 'file': D.df.file.values, 'Item': D.df['item'].map(ITEM_NAME),
                                     'Below full marks': D.score < D.kmax, 'x': xy[:, 0], 'y': xy[:, 1]}))
-        sep.append({'Panel': key, 'Embedding': title, 'Dimensions': X.shape[1], **separation(D, X)})
-        log(f't-SNE done: {title}')
+        sep.append({'Panel': key, 'Embedding': title, 'Projection': method, 'Dimensions': X.shape[1], **idx})
     coords = pd.concat(coords, ignore_index=True) if coords else pd.DataFrame()
     sep = pd.DataFrame(sep).set_index('Panel') if sep else pd.DataFrame()
     save_csv(coords, os.path.join(P.embeddings, 'tsne_coordinates.csv'), index=False)
