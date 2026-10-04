@@ -39,10 +39,11 @@ pretrained on labelled photos, unlabelled photos and document scans.
   <img src="assets/dpe_architecture.png" width="100%" alt="DPE architecture">
 </p>
 
-<p align="center"><b>DPE.</b> (a) Three encoders with different pretraining read the ink map at their own input size.
-Each feeds its own score head, and DPE averages the three score distributions of the drawing's shape. The average has
-no trainable weights. (b) The score head normalises the feature, maps it to 7 logits for each of the 8 shapes, keeps
-the row of the drawing's shape and applies a softmax over its valid scores.</p>
+<p align="center"><b>DPE, from the ink map to the predicted score.</b> Three encoders with different pretraining read
+the ink map at their own input size. In each member, the feature passes through layer normalisation, dropout and a
+linear layer to logits for the 8 shapes and 7 scores. The shape index selects the row of the drawing's shape, scores
+above its maximum are masked, and a softmax gives the score distribution. DPE averages the three distributions and
+predicts the most probable valid score. The average has no trainable weights.</p>
 
 For a drawing $x$ of shape $i$ with maximum score $K_i$, member $m$ gives $p_m(k \mid x, i)$ over $k = 0, \dots, K_i$, and
 
