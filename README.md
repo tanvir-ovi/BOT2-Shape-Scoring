@@ -149,7 +149,7 @@ Outputs go to `results/`:
 | Folder | Content |
 |---|---|
 | `results/data` | index of the drawings with their fold, excluded files, score and criterion tables, OpenCV features, input cache |
-| `results/runs` | per scorer and fold: validation and test probabilities; for networks also test embeddings, the epoch log and the weights of the ensemble members |
+| `results/runs` | per scorer and fold: validation and test probabilities, and for networks also test embeddings, the epoch log and the weights of the ensemble members |
 | `results/predictions` | out-of-fold predicted score and probabilities of every scorer for every drawing |
 | `results/metrics` | summary, agreement, accuracy per shape and per fold, metrics per shape, confusion matrices, rule cut-offs, training summary, embedding separation, weight verification |
 | `results/statistics` | paired comparisons with intervals, permutation and McNemar p values, Holm-adjusted p values and verdicts |
