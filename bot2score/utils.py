@@ -107,6 +107,18 @@ def code_hashes(package_dir):
     return {f: sha256(os.path.join(package_dir, f)) for f in sorted(os.listdir(package_dir)) if f.endswith('.py')}
 
 
+def quiet_libraries():
+    """Hides download progress bars and library warnings, so that the notebook output is the run log and the results.
+    Call before torch, timm or transformers are imported."""
+    import warnings
+    for var in ('HF_HUB_DISABLE_PROGRESS_BARS', 'HF_HUB_DISABLE_IMPLICIT_TOKEN'):
+        os.environ.setdefault(var, '1')
+    os.environ.setdefault('TRANSFORMERS_VERBOSITY', 'error')
+    os.environ.setdefault('HF_HUB_VERBOSITY', 'error')
+    for category in (UserWarning, FutureWarning, DeprecationWarning):
+        warnings.filterwarnings('ignore', category=category)
+
+
 def in_colab():
     return 'google.colab' in sys.modules
 
