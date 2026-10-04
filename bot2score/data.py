@@ -1,4 +1,4 @@
-"""BOT-2 shape items, archive indexing, image preprocessing and child-grouped cross-validation folds."""
+"""BOT-2 shape items and rubric criteria, indexing of the archive, image preprocessing and the child-grouped folds."""
 import os
 import re
 import shutil
@@ -13,7 +13,7 @@ import cv2
 
 from .utils import atomic_save, parallel_map, save_csv
 
-FACETS = {
+FACETS = {                                     # rubric criteria of every item, in rubric order
     'Circle':             ['basic', 'closure', 'edges', 'size'],
     'Square':             ['basic', 'closure', 'edges', 'orientation', 'size'],
     'Overlapped circle':  ['basic', 'closure', 'edges', 'orientation', 'overlap', 'size'],
@@ -23,10 +23,12 @@ FACETS = {
     'Star':               ['basic', 'closure', 'edges', 'orientation', 'size'],
     'Overlapped pencils': ['basic', 'closure', 'edges', 'orientation', 'overlap', 'size'],
 }
-ITEMS = list(FACETS)                                                  # BOT-2 administration order
-ITEM_NAME = {s: 'Diamond' if s == 'Diagonal' else s for s in ITEMS}   # the folder "Diagonal" holds the diamond item
+ITEMS = list(FACETS)                           # archive folder names in BOT-2 administration order
 ITEM_LABEL = {'Circle': 'Circle', 'Square': 'Square', 'Overlapped circle': 'Overlapping circles', 'Wave': 'Wavy line',
               'Triangle': 'Triangle', 'Diagonal': 'Diamond', 'Star': 'Star', 'Overlapped pencils': 'Overlapping pencils'}
+CRITERIA = ['basic', 'closure', 'edges', 'orientation', 'overlap', 'size']
+CRITERION_LABEL = {'basic': 'Basic shape', 'closure': 'Closure', 'edges': 'Edges', 'orientation': 'Orientation',
+                   'overlap': 'Overlap', 'size': 'Overall size'}
 MAX_SCORE = {s: len(f) for s, f in FACETS.items()}
 ITEM_ID = {s: i for i, s in enumerate(ITEMS)}
 N_ITEMS, N_CLS = len(ITEMS), max(MAX_SCORE.values()) + 1
@@ -39,6 +41,8 @@ INPUT_SIZE = 512
 
 
 def parse_facets(score, code, k):
+    """Criterion marks as a string of 0 and 1 in rubric order. A score of 0 or full marks fixes every mark; other
+    scores need the code in the file name, which must have one digit per criterion and sum to the score."""
     if code:
         fv = [int(c) for c in code]
     elif score in (0, k):
@@ -58,22 +62,32 @@ def build_index(root):
         for f in sorted(os.listdir(os.path.join(root, item))):
             m = PATTERN.match(f)
             if not m:
-                dropped.append((item, f, 'file name')); continue
+                dropped.append((ITEM_LABEL[item], f, 'file name')); continue
             num, score = int(m.group(1)), int(m.group(3))
             if score > k:
-                dropped.append((item, f, 'score above maximum')); continue
+                dropped.append((ITEM_LABEL[item], f, 'score above the maximum')); continue
             p = os.path.join(root, item, f)
             rows.append(dict(file=f, path=p, item=item, num=num, score=score, facets=parse_facets(score, m.group(4), k),
                              md5=hashlib.md5(open(p, 'rb').read()).hexdigest()))
     df = pd.DataFrame(rows)
     dup = df.md5.duplicated(keep=False)
-    dropped += [(i, f, 'duplicate, conflicting score') for i, f in zip(df['item'][dup], df.file[dup])]
+    dropped += [(ITEM_LABEL[i], f, 'byte-identical copy with a different score') for i, f in zip(df['item'][dup], df.file[dup])]
     df = df[~dup].drop(columns='md5').reset_index(drop=True)
     order = df['item'].map(ITEMS.index)
     seq = pd.DataFrame({'num': df.num, 'order': order}).sort_values(['num', 'order'])
     start = (seq.order.diff() <= 0) | (seq.num.diff() > len(ITEMS))
     df['child'] = start.cumsum().reindex(df.index)
-    return df, pd.DataFrame(dropped, columns=['item', 'file', 'reason'])
+    return df, pd.DataFrame(dropped, columns=['Item', 'File', 'Reason'])
+
+
+def marks_array(df):
+    """Examiner's criterion marks with one column per criterion in CRITERIA: 1 passed, 0 failed, NaN when the mark is
+    unknown or the criterion is not part of the item."""
+    M = np.full((len(df), len(CRITERIA)), np.nan, np.float32)
+    for r, (item, code) in enumerate(zip(df['item'], df.facets)):
+        for c, b in zip(FACETS[item], code):
+            M[r, CRITERIA.index(c)] = int(b)
+    return M
 
 
 def ink_map(path, max_side=1024):
@@ -130,7 +144,7 @@ def make_folds(df, n_folds=N_FOLDS, seed=FOLD_SEED):
 
 def split(D, k, n_inner=N_INNER, seed=FOLD_SEED):
     """Training, validation and test indices of fold k. The test part is fold k; the validation part is one eighth of
-    the remaining children, used only for checkpoint selection."""
+    the remaining children, used only to select the checkpoint of a network and the scorer of a paradigm."""
     from sklearn.model_selection import StratifiedGroupKFold
     rest, te = np.where(D.fold != k)[0], np.where(D.fold == k)[0]
     a, b = next(StratifiedGroupKFold(n_inner, shuffle=True, random_state=seed + k).split(rest, D.strata[rest], D.child[rest]))
@@ -164,16 +178,17 @@ def prepare(zip_path, P, local_dir='/content/data', size=INPUT_SIZE, workers=Non
         if z['files'].tolist() == df.file.tolist():
             imgs = z['x']
     if imgs is None:
-        log('Building the input cache (first run only) ...')
+        log('Building the network input cache (first run only) ...')
         imgs = np.stack(parallel_map(partial(to_input, size=size), df.path.tolist(), workers))
         atomic_save(cache, lambda p: np.savez_compressed(p, x=imgs, files=np.array(df.file.tolist(), dtype=str)))
 
     D = SimpleNamespace(df=df, dropped=dropped, imgs=imgs, item=df['item'].map(ITEM_ID).values,
                         score=df.score.values.astype(int), child=df.child.values, fold=df.fold.values,
-                        strata=(df['item'] + '_' + df.score.astype(str)).values, n_folds=N_FOLDS, size=size, tag=tag)
+                        marks=marks_array(df), strata=(df['item'] + '_' + df.score.astype(str)).values,
+                        n_folds=N_FOLDS, size=size, tag=tag)
     D.kmax = K_OF_ITEM[D.item]
-    log(f'{len(df)} drawings from {df.child.nunique()} inferred children, {len(dropped)} files excluded, '
-        f'{N_FOLDS} child-grouped folds, inputs {imgs.shape[1]} x {imgs.shape[2]} px')
+    log(f'{len(df)} drawings of {df.child.nunique()} inferred children, {len(dropped)} files excluded, '
+        f'{N_FOLDS} child-grouped folds, network inputs {imgs.shape[1]} x {imgs.shape[2]} px')
     return D
 
 
@@ -183,20 +198,56 @@ def class_counts(items, scores):
     return cnt
 
 
-def score_table(D):
-    """Drawings per item and score, with the share at full marks."""
-    t = pd.crosstab(D.df['item'].map(ITEM_NAME), D.df.score).reindex([ITEM_NAME[s] for s in ITEMS]).fillna(0).astype(int)
-    t['Total'] = t.sum(1)
-    t['Full marks (%)'] = [100 * t.loc[ITEM_NAME[s], MAX_SCORE[s]] / t.loc[ITEM_NAME[s], 'Total'] for s in ITEMS]
-    t.index.name, t.columns.name = 'Item', 'Score'
+def score_table(D, P=None):
+    """Drawings per item and expert score, with the share at full marks."""
+    labels = [ITEM_LABEL[s] for s in ITEMS]
+    t = pd.crosstab(D.df['item'].map(ITEM_LABEL), D.df.score).reindex(index=labels, columns=range(N_CLS), fill_value=0)
+    t.loc['All items'] = t.sum(0)
+    t.columns = [f'Score {c}' for c in t.columns]
+    t['Drawings'] = t.sum(1)
+    full = [t.loc[ITEM_LABEL[s], f'Score {MAX_SCORE[s]}'] / t.loc[ITEM_LABEL[s], 'Drawings'] for s in ITEMS]
+    t['Full marks (%)'] = [100 * f for f in full] + [100 * float(np.mean(D.score == D.kmax))]
+    t.insert(0, 'Maximum score', [str(MAX_SCORE[s]) for s in ITEMS] + [''])
+    t.index.name = 'Item'
+    if P is not None:
+        save_csv(t, os.path.join(P.data, 'score_distribution.csv'))
     return t.round(1)
 
 
-def fold_table(D):
+def criterion_table(D, P=None):
+    """Share (%) of drawings that fail each rubric criterion. A score of 0 means that the basic shape failed and sets
+    every other criterion to 0, so the other criteria are counted among drawings scored above 0. Drawings whose
+    criterion marks are unknown are left out."""
+    rows, counts = [], []
+    for i, s in enumerate(ITEMS):
+        row = {'Item': ITEM_LABEL[s]}
+        for c in CRITERIA:
+            if c not in FACETS[s]:
+                row[CRITERION_LABEL[c]] = np.nan
+                continue
+            m = (D.item == i) & (D.score >= 0 if c == 'basic' else D.score > 0)
+            v = D.marks[m, CRITERIA.index(c)]
+            v = v[~np.isnan(v)]
+            row[CRITERION_LABEL[c]] = 100 * float(np.mean(v == 0)) if len(v) else np.nan
+            counts.append({'Item': ITEM_LABEL[s], 'Criterion': CRITERION_LABEL[c], 'Drawings with a known mark': len(v),
+                           'Failed': int((v == 0).sum())})
+        rows.append(row)
+    t = pd.DataFrame(rows).set_index('Item')
+    if P is not None:
+        save_csv(t, os.path.join(P.data, 'criterion_failures.csv'))
+        save_csv(pd.DataFrame(counts), os.path.join(P.data, 'criterion_failure_counts.csv'), index=False)
+    return t.round(1)
+
+
+def fold_table(D, P=None):
     rows = []
     for k in range(D.n_folds):
         tr, va, te = split(D, k)
         rows.append({'Fold': k, 'Training drawings': len(tr), 'Validation drawings': len(va), 'Test drawings': len(te),
+                     'Training children': len(np.unique(D.child[tr])), 'Validation children': len(np.unique(D.child[va])),
                      'Test children': len(np.unique(D.child[te])),
-                     'Test below full marks (%)': 100 * np.mean(D.score[te] < D.kmax[te])})
-    return pd.DataFrame(rows).set_index('Fold').round(1)
+                     'Test drawings below full marks (%)': 100 * np.mean(D.score[te] < D.kmax[te])})
+    t = pd.DataFrame(rows).set_index('Fold')
+    if P is not None:
+        save_csv(t, os.path.join(P.data, 'folds.csv'))
+    return t.round(1)

@@ -6,14 +6,15 @@ import glob
 import numpy as np
 import pandas as pd
 
-from .models import NETWORKS, build_network, label
+from .models import NETWORKS, build_network
+from .scorers import label
 from .training import unit_paths, load_weights, predict, _device
 from .utils import sha256, save_csv
 
 
 def check_weights(D, P, keys=None, cfgs=None, device=None, log=print):
-    """For every stored weight file: maximum absolute difference of the re-predicted probabilities and the share of
-    drawings whose predicted score is unchanged."""
+    """For every stored weight file: the largest absolute difference between the re-predicted and the stored test
+    probabilities, and the share of test drawings whose predicted score is unchanged."""
     device, cfgs, rows = _device(device), cfgs or {}, []
     for key in keys or NETWORKS:
         for k in range(D.n_folds):
@@ -24,14 +25,16 @@ def check_weights(D, P, keys=None, cfgs=None, device=None, log=print):
             net = load_weights(build_network(cfgs.get(key, NETWORKS[key]), pretrained=False), paths.weights).to(device)
             q, _ = predict(net, D, z['te_idx'], device)
             rows.append({'Network': label(key), 'Fold': k, 'Test drawings': len(q),
-                         'Max |probability difference|': float(np.abs(q - z['q_te']).max()),
+                         'Largest probability difference': float(np.abs(q - z['q_te']).max()),
                          'Same predicted score (%)': 100 * float(np.mean(q.argmax(1) == z['q_te'].argmax(1)))})
             del net
     t = pd.DataFrame(rows)
     if len(t):
         save_csv(t, os.path.join(P.metrics, 'weight_verification.csv'), index=False)
-        log(f'Re-predicted {len(t)} test folds from the saved weights: '
-            f'{t["Same predicted score (%)"].min():.2f}% or more of the scores unchanged')
+        same = int((t['Same predicted score (%)'] == 100).sum())
+        log(f'Re-predicted {len(t)} test folds from the saved weights: the predicted score of every test drawing is '
+            f'unchanged in {same} of {len(t)} folds; largest probability difference '
+            f'{t["Largest probability difference"].max():.1e}')
     else:
         log('No saved weights found')
     return t

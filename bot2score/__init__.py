@@ -1,2 +1,3 @@
-"""Automated scoring of BOT-2 shape drawings under child-grouped cross-validation."""
-__version__ = '1.0.0'
+"""Automated scoring of BOT-2 shape drawings with rubric rules, machine-learning classifiers and deep networks, all
+evaluated with the same child-grouped five-fold cross-validation."""
+__version__ = '2.0.0'

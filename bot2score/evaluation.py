@@ -1,104 +1,118 @@
-"""Out-of-fold predictions, metrics, paired child-level statistics and the embedding analysis."""
+"""Out-of-fold test predictions of every scorer, accuracy and agreement with the expert scores, paired child-level
+statistics, detection of drawings below full marks and the embedding analysis. Every drawing is scored once, by the
+scorer trained without the fold that holds it. Unless a name says otherwise, a metric is the mean of its values on the
+eight items."""
 import os
 
 import numpy as np
 import pandas as pd
 
-from .data import ITEMS, ITEM_NAME, MAX_SCORE, N_ITEMS, N_CLS
-from .models import NETWORKS, ENSEMBLE, CLASSICAL, PROPOSED, systems, label, group
+from .data import ITEMS, ITEM_LABEL, MAX_SCORE, N_ITEMS, N_CLS
+from .metrics import kappa, kappa_from_counts, binary_kappa, cramers_v, mean_item_accuracy, band
+from .models import NETWORKS
+from .scorers import (PAIRS, SELECTED, ENSEMBLE, PROPOSED, NETWORK_KEYS, CLASSIFIER_KEYS, individual, label, paradigm,
+                      role)
 from .training import unit_paths, unit_done, signature
 from .utils import atomic_save, save_csv
 
 N_BOOT = 10000          # child-level bootstrap and permutation resamples
 MARGIN = 1.0            # equivalence margin, accuracy points
 SEED = 2026
-FAMILIES = {            # fixed before the runs; Holm correction within each family
-    'RQ1': [(PROPOSED, b) for b in ('majority', 'geometric_gb', 'resnet50', 'efficientnetv2_s', 'vit_b16', 'cvit',
-                                     'convnext_512', 'dinov2_336', 'dit_224')],
-    'RQ2': [('dit_224', 'beit_natural'), ('beit_sketch', 'beit_natural'), ('dit_224', 'beit_sketch'),
-            ('convnext_512', 'convnext_224')],
+FAMILIES = {            # fixed before the run; Holm correction within each family
+    'Paradigms':   [('best_network', 'best_classifier'), ('best_network', 'rules'), ('best_classifier', 'rules')],
+    'Proposed':    [(PROPOSED, b) for b in individual() if b != PROPOSED],
+    'Ensemble':    [(PROPOSED, p) for p in PAIRS],
+    'Pretraining': [('dit_224', 'beit_natural'), ('beit_sketch', 'beit_natural'), ('dit_224', 'beit_sketch'),
+                    ('convnext_512', 'convnext_224')],
 }
+_W = {}
 
 
 # ---------------------------------------------------------------------------------------------------
 # Out-of-fold predictions
 # ---------------------------------------------------------------------------------------------------
+def _fold_file(P, key, D, k):
+    if key in NETWORKS:
+        paths = unit_paths(P, key, k)
+        return paths.npz if unit_done(paths, signature(key, dict(NETWORKS[key]), D, k)) else None
+    f = os.path.join(P.runs, key, f'fold{k}.npz')
+    return f if os.path.exists(f) else None
+
+
 def collect(D, P, log=print):
-    """Test-fold probabilities of every scorer for all drawings, plus the proposed ensemble (mean of its members)."""
-    n, R = len(D.score), {}
-    for key in list(NETWORKS) + list(CLASSICAL):
-        q, found = np.full((n, N_CLS), np.nan, np.float32), 0
+    """Test-fold probabilities of every scorer for all drawings; the proposed ensemble and the ensembles without one
+    member (means of member probabilities); and, in each fold, the network and the classifier with the highest
+    validation accuracy."""
+    n, R, val = len(D.score), {}, {}
+    for key in individual():
+        if key == PROPOSED:
+            continue
+        q, acc = np.full((n, N_CLS), np.nan, np.float32), {}
         for k in range(D.n_folds):
-            paths = unit_paths(P, key, k)
-            ok = unit_done(paths, signature(key, NETWORKS[key], D, k)) if key in NETWORKS else os.path.exists(paths.npz)
-            if ok:
-                z = np.load(paths.npz)
-                q[z['te_idx']] = z['q_te']
-                found += 1
-        if found == D.n_folds:
-            R[key] = q
+            f = _fold_file(P, key, D, k)
+            if f is None:
+                continue
+            z = np.load(f)
+            q[z['te_idx']] = z['q_te']
+            acc[k] = mean_item_accuracy(D.score[z['va_idx']], z['q_va'].argmax(1), D.item[z['va_idx']])
+        if len(acc) == D.n_folds:
+            R[key], val[key] = q, acc
         else:
-            log(f'{label(key)}: {found} of {D.n_folds} folds finished, left out of the analysis')
+            log(f'{label(key)}: {len(acc)} of {D.n_folds} folds finished; left out of the analysis')
     if all(m in R for m in ENSEMBLE):
         R[PROPOSED] = np.mean([R[m] for m in ENSEMBLE], 0)
-    R = {k: R[k] for k in systems() if k in R}
+        for key, (_, members) in PAIRS.items():
+            R[key] = np.mean([R[m] for m in members], 0)
+    rows = []
+    for key, pool in (('best_network', NETWORK_KEYS), ('best_classifier', CLASSIFIER_KEYS)):
+        pool = [m for m in pool if m in val]
+        if not pool:
+            continue
+        q = np.full((n, N_CLS), np.nan, np.float32)
+        for k in range(D.n_folds):
+            pick = max(pool, key=lambda m: val[m][k])
+            te = np.where(D.fold == k)[0]
+            q[te] = R[pick][te]
+            rows.append({'Paradigm': paradigm(key), 'Fold': k, 'Chosen scorer': label(pick),
+                         'Validation accuracy (%)': 100 * val[pick][k]})
+        R[key] = q
+    save_csv(pd.DataFrame(rows), os.path.join(P.metrics, 'paradigm_selection.csv'), index=False)
+    R = {k: R[k] for k in individual() + list(PAIRS) + list(SELECTED) if k in R}
 
     df = D.df[['file', 'item', 'child', 'fold', 'score']].copy()
-    df['item'] = df['item'].map(ITEM_NAME)
+    df['item'] = df['item'].map(ITEM_LABEL)
     for key, q in R.items():
         df[f'pred_{key}'] = q.argmax(1)
-        df[f'p_below_full_{key}'] = 1 - q[np.arange(n), D.kmax]
     save_csv(df, os.path.join(P.predictions, 'oof_predictions.csv'), index=False)
     atomic_save(os.path.join(P.predictions, 'oof_probabilities.npz'),
                 lambda p: np.savez_compressed(p, files=np.array(D.df.file.tolist(), dtype=str), **R))
-    log(f'Out-of-fold predictions of {len(R)} scorers for {n} drawings')
+    log(f'Out-of-fold test predictions for {n} drawings: {sum(k in R for k in individual())} scorers, '
+        f'{sum(k in R for k in PAIRS)} ensembles without one member, {sum(k in R for k in SELECTED)} validation-selected')
     return R
 
 
+def selection(P):
+    """The network and the classifier chosen on the validation part of each fold."""
+    t = pd.read_csv(os.path.join(P.metrics, 'paradigm_selection.csv'))
+    t['Chosen on validation'] = t['Chosen scorer'] + ' (' + t['Validation accuracy (%)'].map('{:.2f}%'.format) + ')'
+    return t.pivot(index='Fold', columns='Paradigm', values='Chosen on validation')
+
+
 # ---------------------------------------------------------------------------------------------------
-# Metrics
+# Child-level resampling
 # ---------------------------------------------------------------------------------------------------
-def qwk(y, p, n=N_CLS):
-    """Quadratic weighted kappa on the full integer scale (scores absent from y and p still count)."""
-    y, p = np.asarray(y, int), np.asarray(p, int)
-    O = np.bincount(y * n + p, minlength=n * n).reshape(n, n).astype(float)
-    tot = O.sum()
-    if tot == 0:
-        return np.nan
-    E = np.outer(O.sum(1), O.sum(0)) / tot
-    i = np.arange(n)
-    W = (i[:, None] - i[None, :]) ** 2
-    den = (W * E).sum()
-    return 1 - (W * O).sum() / den if den > 0 else np.nan
-
-
-def mean_item_accuracy(y, p, items):
-    return float(np.mean([np.mean(y[items == i] == p[items == i]) for i in range(N_ITEMS) if (items == i).any()]))
-
-
-def mean_item_qwk(y, p, items):
-    v = [qwk(y[items == i], p[items == i]) for i in range(N_ITEMS) if (items == i).any()]
-    return np.nan if np.all(np.isnan(v)) else float(np.nanmean(v))
-
-
-def score_metrics(y, p, kmax):
-    from sklearn.metrics import balanced_accuracy_score, precision_recall_fscore_support
-    mp, mr, mf, _ = precision_recall_fscore_support(y, p, average='macro', zero_division=0)
-    wp, wr, wf, _ = precision_recall_fscore_support(y, p, average='weighted', zero_division=0)
-    below = y < kmax
-    return {'Accuracy': np.mean(y == p), 'Balanced accuracy': balanced_accuracy_score(y, p), 'Macro precision': mp,
-            'Macro recall': mr, 'Macro F1': mf, 'Weighted precision': wp, 'Weighted recall': wr, 'Weighted F1': wf,
-            'QWK': qwk(y, p), 'MAE': np.mean(np.abs(y - p)), 'Within 1 point': np.mean(np.abs(y - p) <= 1),
-            'Recall below full marks': np.mean(p[below] < kmax) if below.any() else np.nan}
-
-
-def _below_full(D, q):
-    return D.score < D.kmax, 1 - q[np.arange(len(q)), D.kmax]
-
-
 def _children(D):
     _, inv = np.unique(D.child, return_inverse=True)
     return inv, inv.max() + 1
+
+
+def _weights(C):
+    """Multinomial counts of 10,000 resamples of the C children (the same resamples for every scorer)."""
+    if C not in _W:
+        rng = np.random.default_rng(SEED)
+        _W[C] = np.concatenate([rng.multinomial(C, np.full(C, 1 / C), size=min(1000, N_BOOT - s)).astype(np.float32)
+                                for s in range(0, N_BOOT, 1000)])
+    return _W[C]
 
 
 def _cells(D, v):
@@ -110,27 +124,37 @@ def _cells(D, v):
     return S, N
 
 
-def _bootstrap(S, N, B=N_BOOT, seed=SEED):
-    """Mean over items of sum(v) / count under resampling of children with replacement."""
-    rng, C, out = np.random.default_rng(seed), len(S), []
-    for start in range(0, B, 1000):
-        W = rng.multinomial(C, np.full(C, 1 / C), size=min(1000, B - start)).astype(float)
-        with np.errstate(invalid='ignore', divide='ignore'):
-            out.append(np.nanmean((W @ S) / (W @ N), 1))
-    return np.concatenate(out)
+def _bootstrap(S, N):
+    """Mean over items of sum(v) / count for every resample of children."""
+    W = _weights(len(S))
+    with np.errstate(invalid='ignore', divide='ignore'):
+        return np.nanmean((W @ S) / (W @ N), 1)
 
 
-def _permutation_p(S, N, B=N_BOOT, seed=SEED + 1):
+def _kappa_boot(D, p, weights=None):
+    """Kappa (or QWK) of every item for every resample of children: array (resamples, items)."""
+    c, C = _children(D)
+    W = _weights(C)
+    out = np.full((N_BOOT, N_ITEMS), np.nan)
+    for i in range(N_ITEMS):
+        m = D.item == i
+        M = np.zeros((C, N_CLS * N_CLS), np.float32)
+        np.add.at(M, (c[m], D.score[m] * N_CLS + p[m]), 1)
+        out[:, i] = kappa_from_counts((W @ M).reshape(-1, N_CLS, N_CLS), weights)
+    return out
+
+
+def _permutation_p(S, N, seed=SEED + 1):
     """Two-sided p of a paired sign-flip test: the two scorers' predictions are swapped for all drawings of a child."""
     rng, C = np.random.default_rng(seed), len(S)
     tot = N.sum(0)
     with np.errstate(invalid='ignore', divide='ignore'):
         obs = abs(np.nanmean(S.sum(0) / tot))
         hits = 0
-        for start in range(0, B, 1000):
-            signs = rng.choice([-1.0, 1.0], size=(min(1000, B - start), C))
+        for start in range(0, N_BOOT, 1000):
+            signs = rng.choice([-1.0, 1.0], size=(min(1000, N_BOOT - start), C))
             hits += int((np.abs(np.nanmean((signs @ S) / tot, 1)) >= obs - 1e-12).sum())
-    return (hits + 1) / (B + 1)
+    return (hits + 1) / (N_BOOT + 1)
 
 
 def mcnemar_exact(y, pa, pb):
@@ -148,27 +172,58 @@ def holm(p):
     return adj
 
 
+# ---------------------------------------------------------------------------------------------------
+# Metrics
+# ---------------------------------------------------------------------------------------------------
+def item_scores(y, p, kmax):
+    """Metrics of one item: y expert scores, p predicted scores, kmax the full marks of the item."""
+    from sklearn.metrics import balanced_accuracy_score, precision_recall_fscore_support
+    mp, mr, mf, _ = precision_recall_fscore_support(y, p, average='macro', zero_division=0)
+    _, _, wf, _ = precision_recall_fscore_support(y, p, average='weighted', zero_division=0)
+    below = y < kmax
+    k = kappa(y, p)
+    return {'Drawings': len(y), 'Accuracy': np.mean(y == p), 'Balanced accuracy': balanced_accuracy_score(y, p),
+            'Macro precision': mp, 'Macro recall': mr, 'Macro F1': mf, 'Weighted F1': wf, 'Kappa': k,
+            'QWK': kappa(y, p, 'quadratic'), "Cramér's V": cramers_v(y, p),
+            'Full-marks kappa': binary_kappa(y == kmax, p == kmax), 'Within one point': np.mean(np.abs(y - p) <= 1),
+            'MAE': np.mean(np.abs(y - p)), 'Recall below full marks': np.mean(p[below] < kmax) if below.any() else np.nan,
+            'Agreement (kappa)': band(k)}
+
+
+def _per_item(D, p):
+    return pd.DataFrame({ITEM_LABEL[s]: item_scores(D.score[D.item == i], p[D.item == i], MAX_SCORE[s])
+                         for i, s in enumerate(ITEMS)}).T.infer_objects()
+
+
+def _below_full(D, q):
+    return D.score < D.kmax, 1 - q[np.arange(len(q)), D.kmax]
+
+
+def _fold_accuracies(D, p):
+    return [mean_item_accuracy(D.score[D.fold == k], p[D.fold == k], D.item[D.fold == k]) for k in range(D.n_folds)]
+
+
 def summary(D, R, P=None):
-    """One row per scorer: mean per-item accuracy with its child-level 95% interval and fold SD, agreement measures,
-    and detection of drawings below full marks."""
+    """One row per scorer: accuracy with its child-level 95% interval and fold SD, accuracy over all drawings,
+    imbalance-aware metrics, agreement, and the detection of drawings below full marks (pooled over items)."""
     from sklearn.metrics import average_precision_score, precision_recall_fscore_support
     rows = []
-    for key, q in R.items():
+    for key in [k for k in individual() if k in R]:
+        q = R[key]
         p = q.argmax(1)
         correct = (p == D.score).astype(float)
-        S, N = _cells(D, correct)
-        lo, hi = np.percentile(_bootstrap(S, N), [2.5, 97.5])
-        per_item = pd.DataFrame({ITEM_NAME[s]: score_metrics(D.score[D.item == i], p[D.item == i], MAX_SCORE[s])
-                                 for i, s in enumerate(ITEMS)}).T
-        folds = [mean_item_accuracy(D.score[D.fold == k], p[D.fold == k], D.item[D.fold == k]) for k in range(D.n_folds)]
+        lo, hi = np.percentile(_bootstrap(*_cells(D, correct)), [2.5, 97.5])
+        per = _per_item(D, p)
+        num = lambda c: per[c].astype(float).mean()
         yb, sb = _below_full(D, q)
         bp, br, bf, _ = precision_recall_fscore_support(yb, p < D.kmax, average='binary', zero_division=0)
-        rows.append({'Key': key, 'Scorer': label(key), 'Role': group(key),
-                     'Accuracy (%)': 100 * per_item.Accuracy.mean(), 'CI low': 100 * lo, 'CI high': 100 * hi,
-                     'Fold SD': 100 * np.std(folds, ddof=1), 'Pooled accuracy (%)': 100 * correct.mean(),
-                     'Balanced accuracy': per_item['Balanced accuracy'].mean(), 'Macro F1': per_item['Macro F1'].mean(),
-                     'Weighted F1': per_item['Weighted F1'].mean(), 'QWK': per_item.QWK.mean(),
-                     'MAE': np.mean(np.abs(D.score - p)), 'Precision below full': bp, 'Recall below full': br,
+        rows.append({'Key': key, 'Scorer': label(key), 'Paradigm': paradigm(key), 'Role': role(key),
+                     'Accuracy (%)': 100 * num('Accuracy'), 'CI low': 100 * lo, 'CI high': 100 * hi,
+                     'Fold SD': 100 * np.std(_fold_accuracies(D, p), ddof=1),
+                     'Accuracy, all drawings (%)': 100 * correct.mean(), 'Balanced accuracy': num('Balanced accuracy'),
+                     'Macro F1': num('Macro F1'), 'Weighted F1': num('Weighted F1'), 'MAE': num('MAE'),
+                     'Within one point (%)': 100 * num('Within one point'), 'Kappa': num('Kappa'), 'QWK': num('QWK'),
+                     'Full-marks kappa': num('Full-marks kappa'), 'Precision below full': bp, 'Recall below full': br,
                      'F1 below full': bf, 'AP below full': average_precision_score(yb, sb)})
     t = pd.DataFrame(rows).set_index('Key')
     if P is not None:
@@ -176,9 +231,72 @@ def summary(D, R, P=None):
     return t
 
 
+def agreement(D, R, P=None):
+    """Agreement with the expert: Cohen's kappa and QWK with child-level 95% intervals, the kappa of the decision
+    'full marks or not', the share within one point, and the number of items whose kappa is above 0.60
+    (substantial or better on the Landis and Koch scale)."""
+    rows = []
+    for key in [k for k in individual() if k in R]:
+        p = R[key].argmax(1)
+        per = _per_item(D, p)
+        kb, qb = np.nanmean(_kappa_boot(D, p), 1), np.nanmean(_kappa_boot(D, p, 'quadratic'), 1)
+        k_items = per['Kappa'].astype(float)
+        rows.append({'Key': key, 'Scorer': label(key), 'Paradigm': paradigm(key),
+                     'Kappa': k_items.mean(), 'Kappa CI low': np.nanpercentile(kb, 2.5),
+                     'Kappa CI high': np.nanpercentile(kb, 97.5), 'QWK': per['QWK'].astype(float).mean(),
+                     'QWK CI low': np.nanpercentile(qb, 2.5), 'QWK CI high': np.nanpercentile(qb, 97.5),
+                     'Full-marks kappa': per['Full-marks kappa'].astype(float).mean(),
+                     'Within one point (%)': 100 * per['Within one point'].astype(float).mean(),
+                     'Items with kappa above 0.60': int((k_items > 0.60).sum()), 'Agreement (kappa)': band(k_items.mean())})
+    t = pd.DataFrame(rows).set_index('Key')
+    if P is not None:
+        save_csv(t, os.path.join(P.metrics, 'agreement.csv'))
+    return t
+
+
+def item_agreement(D, R, P=None, keys=(PROPOSED, 'best_network', 'best_classifier', 'rules')):
+    """Kappa and QWK of every item with child-level 95% intervals, for the proposed ensemble and the scorer chosen
+    to represent each paradigm."""
+    rows = []
+    for key in [k for k in keys if k in R]:
+        p = R[key].argmax(1)
+        kb, qb = _kappa_boot(D, p), _kappa_boot(D, p, 'quadratic')
+        for i, s in enumerate(ITEMS + ['Mean']):
+            if s == 'Mean':
+                kv, qv = np.nanmean([r['Kappa'] for r in rows[-N_ITEMS:]]), np.nanmean([r['QWK'] for r in rows[-N_ITEMS:]])
+                kd, qd = np.nanmean(kb, 1), np.nanmean(qb, 1)
+                name = 'Mean'
+            else:
+                m = D.item == i
+                kv, qv = kappa(D.score[m], p[m]), kappa(D.score[m], p[m], 'quadratic')
+                kd, qd = kb[:, i], qb[:, i]
+                name = ITEM_LABEL[s]
+            rows.append({'Key': key, 'Scorer': label(key), 'Item': name, 'Kappa': kv,
+                         'Kappa CI low': np.nanpercentile(kd, 2.5), 'Kappa CI high': np.nanpercentile(kd, 97.5),
+                         'QWK': qv, 'QWK CI low': np.nanpercentile(qd, 2.5), 'QWK CI high': np.nanpercentile(qd, 97.5),
+                         'Agreement (kappa)': band(kv)})
+    t = pd.DataFrame(rows)
+    if P is not None:
+        save_csv(t, os.path.join(P.metrics, 'agreement_per_item.csv'), index=False)
+    return t
+
+
+def item_metrics(D, R, P=None):
+    """Every metric of every scorer on every item."""
+    rows = []
+    for key in [k for k in individual() if k in R]:
+        per = _per_item(D, R[key].argmax(1))
+        per.insert(0, 'Scorer', label(key))
+        rows.append(per.rename_axis('Item').reset_index())
+    t = pd.concat(rows, ignore_index=True)
+    if P is not None:
+        save_csv(t, os.path.join(P.metrics, 'metrics_per_item.csv'), index=False)
+    return t
+
+
 def item_accuracy(D, R, P=None):
-    t = pd.DataFrame({label(key): {ITEM_NAME[s]: 100 * np.mean(q.argmax(1)[D.item == i] == D.score[D.item == i])
-                                   for i, s in enumerate(ITEMS)} for key, q in R.items()}).T
+    t = pd.DataFrame({label(key): {ITEM_LABEL[s]: 100 * np.mean(R[key].argmax(1)[D.item == i] == D.score[D.item == i])
+                                   for i, s in enumerate(ITEMS)} for key in individual() if key in R}).T
     t['Mean'] = t.mean(1)
     if P is not None:
         save_csv(t, os.path.join(P.metrics, 'accuracy_per_item.csv'))
@@ -186,39 +304,50 @@ def item_accuracy(D, R, P=None):
 
 
 def fold_accuracy(D, R, P=None):
-    t = pd.DataFrame({label(key): {f'Fold {k}': 100 * mean_item_accuracy(D.score[D.fold == k], q.argmax(1)[D.fold == k],
-                                                                         D.item[D.fold == k]) for k in range(D.n_folds)}
-                      for key, q in R.items()}).T
+    t = pd.DataFrame({label(key): dict(zip([f'Fold {k}' for k in range(D.n_folds)],
+                                           100 * np.array(_fold_accuracies(D, R[key].argmax(1)))))
+                      for key in individual() if key in R}).T
     t['Mean'], t['SD'] = t.mean(1), t.iloc[:, :D.n_folds].std(1, ddof=1)
     if P is not None:
         save_csv(t, os.path.join(P.metrics, 'accuracy_per_fold.csv'))
     return t
 
 
-def item_metrics(D, R, P=None):
-    """Precision, recall and F1 (macro and weighted), accuracy, QWK and MAE for every scorer and item."""
+def overview(D, R, keys, name, P=None):
+    """Accuracy with its 95% interval, kappa and QWK of the scorers keys."""
     rows = []
-    for key, q in R.items():
-        p = q.argmax(1)
-        for i, s in enumerate(ITEMS):
-            m = D.item == i
-            rows.append({'Scorer': label(key), 'Item': ITEM_NAME[s], 'Drawings': int(m.sum()),
-                         **score_metrics(D.score[m], p[m], MAX_SCORE[s])})
-    t = pd.DataFrame(rows)
+    for key in [k for k in keys if k in R]:
+        p = R[key].argmax(1)
+        lo, hi = np.percentile(_bootstrap(*_cells(D, (p == D.score).astype(float))), [2.5, 97.5])
+        per = _per_item(D, p)
+        rows.append({'Scorer': label(key), 'Paradigm': paradigm(key),
+                     'Accuracy (%)': 100 * per['Accuracy'].astype(float).mean(), 'CI low': 100 * lo, 'CI high': 100 * hi,
+                     'Kappa': per['Kappa'].astype(float).mean(), 'QWK': per['QWK'].astype(float).mean()})
+    t = pd.DataFrame(rows).set_index('Scorer')
     if P is not None:
-        save_csv(t, os.path.join(P.metrics, 'metrics_per_item.csv'), index=False)
+        save_csv(t, os.path.join(P.metrics, f'{name}.csv'))
     return t
+
+
+def paradigms(D, R, P=None):
+    """The scorer chosen on validation for each paradigm, the rules, the reference and the proposed ensemble."""
+    return overview(D, R, ['best_network', 'best_classifier', 'rules', 'majority', PROPOSED], 'paradigms', P)
+
+
+def ensemble(D, R, P=None):
+    """The proposed ensemble, the ensembles without one member and the members alone."""
+    return overview(D, R, [PROPOSED, *PAIRS, *ENSEMBLE], 'ensemble_members', P)
 
 
 def confusion(D, R, P=None):
     rows = []
-    for key, q in R.items():
-        p = q.argmax(1)
+    for key in [k for k in individual() if k in R]:
+        p = R[key].argmax(1)
         for i, s in enumerate(ITEMS):
             m = D.item == i
             cm = np.zeros((MAX_SCORE[s] + 1,) * 2, int)
             np.add.at(cm, (D.score[m], p[m]), 1)
-            rows += [{'Scorer': label(key), 'Item': ITEM_NAME[s], 'Expert score': a, 'Predicted score': b,
+            rows += [{'Scorer': label(key), 'Item': ITEM_LABEL[s], 'Expert score': a, 'Predicted score': b,
                       'Drawings': int(cm[a, b])} for a in range(len(cm)) for b in range(len(cm))]
     t = pd.DataFrame(rows)
     if P is not None:
@@ -246,9 +375,9 @@ def below_full_curves(D, R, P=None):
 # Paired comparisons
 # ---------------------------------------------------------------------------------------------------
 def compare(D, R, P=None, families=None):
-    """Paired differences in mean per-item accuracy (A minus B) on the same out-of-fold drawings. Intervals and p
-    values resample whole inferred children. A pair is 'different' when the Holm-adjusted permutation p is below 0.05
-    and the 95% interval excludes zero, 'equivalent' when the 90% interval lies within the margin."""
+    """Paired differences in accuracy (A minus B, points) on the same out-of-fold drawings. Intervals and p values
+    resample whole inferred children. A pair is 'different' when the Holm-adjusted permutation p is below 0.05 and the
+    95% interval excludes zero, 'equivalent' when the 90% interval lies within the margin, else 'inconclusive'."""
     out = []
     for fam, pairs in (families or FAMILIES).items():
         rows = []
@@ -261,7 +390,7 @@ def compare(D, R, P=None, families=None):
                 delta = 100 * np.nanmean(S.sum(0) / N.sum(0))
             boot = 100 * _bootstrap(S, N)
             only_a, only_b, p_mc = mcnemar_exact(D.score, pa, pb)
-            rows.append({'Family': fam, 'A': label(a), 'B': label(b), 'Delta (points)': delta,
+            rows.append({'Family': fam, 'A': label(a), 'B': label(b), 'Key A': a, 'Key B': b, 'Delta (points)': delta,
                          'CI95 low': np.percentile(boot, 2.5), 'CI95 high': np.percentile(boot, 97.5),
                          'CI90 low': np.percentile(boot, 5), 'CI90 high': np.percentile(boot, 95),
                          'p (permutation)': _permutation_p(S, N), 'Only A correct': only_a, 'Only B correct': only_b,
@@ -386,8 +515,9 @@ def embeddings(D, R, P, log=print):
         if method != 't-SNE':
             log(f'{title}: t-SNE did not finish, the panel shows the first two principal components')
             title = f'{title} (PCA)'
-        coords.append(pd.DataFrame({'Panel': key, 'Title': title, 'file': D.df.file.values, 'Item': D.df['item'].map(ITEM_NAME),
-                                    'Below full marks': D.score < D.kmax, 'x': xy[:, 0], 'y': xy[:, 1]}))
+        coords.append(pd.DataFrame({'Panel': key, 'Title': title, 'file': D.df.file.values,
+                                    'Item': D.df['item'].map(ITEM_LABEL), 'Below full marks': D.score < D.kmax,
+                                    'x': xy[:, 0], 'y': xy[:, 1]}))
         sep.append({'Panel': key, 'Embedding': title, 'Projection': method, 'Dimensions': X.shape[1], **idx})
     coords = pd.concat(coords, ignore_index=True) if coords else pd.DataFrame()
     sep = pd.DataFrame(sep).set_index('Panel') if sep else pd.DataFrame()

@@ -1,23 +1,87 @@
-"""Feature-based scorers: the most frequent training score per item, and gradient boosting on 64 geometric features."""
+"""OpenCV geometric features: the pencil stroke is separated from the scanned page, and 64 measurements of its size,
+enclosed regions and overlap, symmetry, contour shape, angles and corners, points, crossings, closure and stroke
+quality are taken from it. Drawings without a measurable stroke get 0 for every feature."""
 import os
-import json
 
 import numpy as np
 import pandas as pd
 import cv2
 
-from . import data as bd
-from .data import N_ITEMS, N_CLS, class_counts, ink_map
-from .utils import atomic_save, parallel_map, save_csv
+from .data import ink_map
+from .utils import parallel_map, save_csv
 
-SEED = 2026
 K8 = np.array([[1, 1, 1], [1, 0, 1], [1, 1, 1]])
 
+FEATURES = {   # name: (group, description); the size of the drawing is the longer side of its bounding box
+    'width_rel':        ('Size and position', 'drawing width over image width'),
+    'height_rel':       ('Size and position', 'drawing height over image height'),
+    'size_rel':         ('Size and position', 'square root of the bounding-box area over the image area'),
+    'aspect':           ('Size and position', 'width over height'),
+    'ink_density':      ('Size and position', 'stroke pixels over bounding-box area'),
+    'cx_rel':           ('Size and position', 'horizontal position of the centroid in the bounding box'),
+    'cy_rel':           ('Size and position', 'vertical position of the centroid in the bounding box'),
+    'n_comp':           ('Regions and overlap', 'separate strokes holding more than 5% of the ink'),
+    'n_holes':          ('Regions and overlap', 'enclosed regions larger than 2% of the bounding box'),
+    'hole1_rel':        ('Regions and overlap', 'area of the largest enclosed region over the bounding box'),
+    'hole2_rel':        ('Regions and overlap', 'area of the second enclosed region over the bounding box'),
+    'hole3_rel':        ('Regions and overlap', 'area of the third enclosed region over the bounding box'),
+    'holes_dx':         ('Regions and overlap', 'horizontal distance between the two largest regions over the size'),
+    'holes_dy':         ('Regions and overlap', 'vertical distance between the two largest regions over the size'),
+    'lens_ratio':       ('Regions and overlap', 'area of the middle of the three largest regions over their total'),
+    'half_ratio_lr':    ('Symmetry', 'height ratio of the left and right halves'),
+    'half_ratio_tb':    ('Symmetry', 'width ratio of the upper and lower halves'),
+    'sym_lr':           ('Symmetry', 'overlap of the filled shape with its left-right mirror image'),
+    'sym_ud':           ('Symmetry', 'overlap of the filled shape with its up-down mirror image'),
+    'top_heavy':        ('Symmetry', 'share of the filled area in the upper half'),
+    'circularity':      ('Contour shape', '4 pi area over squared perimeter of the outer contour'),
+    'solidity':         ('Contour shape', 'area over convex-hull area'),
+    'ellipse_ratio':    ('Contour shape', 'longest over shortest axis of the fitted ellipse'),
+    'rect_ratio':       ('Contour shape', 'longer over shorter side of the minimum-area rectangle'),
+    'elongation':       ('Contour shape', 'ratio of the principal second moments'),
+    'hu_1':             ('Contour shape', 'first Hu moment of the filled shape (log scale)'),
+    'hu_2':             ('Contour shape', 'second Hu moment (log scale)'),
+    'hu_3':             ('Contour shape', 'third Hu moment (log scale)'),
+    'hu_4':             ('Contour shape', 'fourth Hu moment (log scale)'),
+    'rect_angle':       ('Angles and corners', 'tilt of the minimum-area rectangle (degrees)'),
+    'axis_angle':       ('Angles and corners', 'tilt of the principal axis (degrees)'),
+    'inner_rect_angle': ('Angles and corners', 'tilt of the rectangle around the largest enclosed region (degrees)'),
+    'vertices_2':       ('Angles and corners', 'corners of the polygon fitted at 2% of the perimeter'),
+    'vertices_4':       ('Angles and corners', 'corners of the polygon fitted at 4% of the perimeter'),
+    'vertices_6':       ('Angles and corners', 'corners of the polygon fitted at 6% of the perimeter'),
+    'side_ratio':       ('Angles and corners', 'longest over shortest side of that polygon'),
+    'radial_cv':        ('Points and lobes', 'variation of the distance from the centroid along the contour'),
+    'radial_range':     ('Points and lobes', 'largest over smallest distance from the centroid'),
+    'radial_peaks':     ('Points and lobes', 'number of distance peaks (points)'),
+    'peak_ratio':       ('Points and lobes', 'longest over shortest of the five highest points'),
+    'top_peak_dev':     ('Points and lobes', 'angle between the nearest point and straight up (degrees)'),
+    'fft_1':            ('Points and lobes', 'Fourier magnitude 1 of the radial profile'),
+    'fft_2':            ('Points and lobes', 'Fourier magnitude 2 of the radial profile'),
+    'fft_3':            ('Points and lobes', 'Fourier magnitude 3 of the radial profile'),
+    'fft_4':            ('Points and lobes', 'Fourier magnitude 4 of the radial profile'),
+    'fft_5':            ('Points and lobes', 'Fourier magnitude 5 of the radial profile'),
+    'fft_6':            ('Points and lobes', 'Fourier magnitude 6 of the radial profile'),
+    'fft_7':            ('Points and lobes', 'Fourier magnitude 7 of the radial profile'),
+    'fft_8':            ('Points and lobes', 'Fourier magnitude 8 of the radial profile'),
+    'cross_row':        ('Crossings', 'stroke crossings along three horizontal lines (mean)'),
+    'cross_col':        ('Crossings', 'stroke crossings along three vertical lines (mean)'),
+    'n_branch':         ('Closure and topology', 'skeleton branches longer than 4% of the size'),
+    'n_tails':          ('Closure and topology', 'free stroke ends longer than 4% of the size (overshoots)'),
+    'n_junc':           ('Closure and topology', 'stroke junctions'),
+    'max_tail':         ('Closure and topology', 'longest free stroke end over the size'),
+    'sum_tail':         ('Closure and topology', 'total length of free stroke ends over the size'),
+    'skel_len':         ('Closure and topology', 'skeleton length over the size'),
+    'end_gap':          ('Closure and topology', 'smallest distance between two free stroke ends over the size'),
+    'open_curve':       ('Closure and topology', '1 when the stroke has free ends and no junction'),
+    'stroke_width':     ('Stroke quality', 'median stroke width over the size'),
+    'width_p95':        ('Stroke quality', '95th percentile over median stroke width'),
+    'thick_frac':       ('Stroke quality', 'share of the stroke wider than 1.7 times the median (retracing)'),
+    'ink_p95':          ('Stroke quality', '95th percentile over median stroke darkness'),
+    'dark_frac':        ('Stroke quality', 'share of the stroke darker than 1.3 times the median'),
+}
 
-# ---------------------------------------------------------------------------------------------------
-# Geometric features of the extracted stroke mask
-# ---------------------------------------------------------------------------------------------------
+
 def remove_frame(m, band=0.08):
+    """Erases long straight lines along the image border (box frame of the booklet page)."""
     h, w = m.shape
     lines = cv2.HoughLinesP(m * 255, 1, np.pi / 180, 80, minLineLength=int(0.3 * min(h, w)), maxLineGap=10)
     if lines is None:
@@ -34,6 +98,7 @@ def remove_frame(m, band=0.08):
 
 
 def ink_mask(ink, band=0.06, min_area=30):
+    """Binary stroke mask: hysteresis threshold, frame removal, and strokes that lie mostly inside the image."""
     from skimage.filters import apply_hysteresis_threshold
     m = apply_hysteresis_threshold(ink, 0.22, 0.5).astype(np.uint8)
     m = remove_frame(cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8)))
@@ -55,6 +120,7 @@ def angle_diff(a, b, period):
 
 
 def radial_profile(cnt, bins=72):
+    """Largest distance from the centroid in each of 72 directions, normalised by its mean."""
     c = cnt[:, 0, :].astype(np.float32)
     d = c - c.mean(0)
     ang = (np.degrees(np.arctan2(-d[:, 1], d[:, 0])) + 360) % 360
@@ -216,55 +282,29 @@ def extract(path):
     return geo_features(ink_mask(ink), ink)
 
 
-def geometric_features(D, P, workers=None, log=print):
-    """64 geometric descriptors per drawing, computed once and cached in results/data."""
+def compute(D, P, workers=None, log=print):
+    """The 64 features of every drawing (rows in the order of the index), computed once and stored in results/data."""
     path = os.path.join(P.data, f'geometric_features{D.tag}.csv')
     if os.path.exists(path):
         g = pd.read_csv(path)
         if g.file.tolist() == D.df.file.tolist():
-            return g.drop(columns='file').fillna(0).values.astype(np.float32), list(g.columns[1:])
-    log('Extracting geometric features (first run only) ...')
-    g = pd.DataFrame(parallel_map(extract, D.df.path.tolist(), workers))
-    g.insert(0, 'file', D.df.file.values)
-    save_csv(g, path, index=False)
-    return g.drop(columns='file').fillna(0).values.astype(np.float32), list(g.columns[1:])
+            G = g.drop(columns='file')[list(FEATURES)]
+            log(f'{G.shape[1]} geometric features of {len(G)} drawings loaded from {os.path.basename(path)}')
+            return G
+    log('Measuring the drawings with OpenCV (first run only) ...')
+    G = pd.DataFrame(parallel_map(extract, D.df.path.tolist(), workers)).reindex(columns=list(FEATURES))
+    missing = int(G.isna().all(1).sum())
+    G = G.fillna(0.0)
+    save_csv(pd.concat([D.df[['file']].reset_index(drop=True), G], axis=1), path, index=False)
+    log(f'{G.shape[1]} geometric features of {len(G)} drawings; {missing} drawings without a measurable stroke got 0')
+    return G
 
 
-# ---------------------------------------------------------------------------------------------------
-# Fitting on each fold
-# ---------------------------------------------------------------------------------------------------
-def _boosting_probs(X, tr, parts, D):
-    """One gradient-boosting classifier per item, fitted on the training part; probabilities for each part."""
-    from sklearn.ensemble import HistGradientBoostingClassifier
-    out = [np.zeros((len(ev), N_CLS), np.float32) for ev in parts]
-    for i in range(N_ITEMS):
-        a = tr[D.item[tr] == i]
-        y = D.score[a]
-        clf = None
-        if len(np.unique(y)) > 1:
-            clf = HistGradientBoostingClassifier(learning_rate=0.05, max_iter=300, max_leaf_nodes=15, l2_regularization=1.0,
-                                                 early_stopping=False, random_state=SEED).fit(X[a], y)
-        for q, ev in zip(out, parts):
-            b = np.where(D.item[ev] == i)[0]
-            if not len(b):
-                continue
-            if clf is None:
-                q[b, y[0]] = 1.0
-            else:
-                q[np.ix_(b, clf.classes_)] = clf.predict_proba(X[ev[b]])
-    return out
-
-
-def run(D, P, workers=None, log=print):
-    """Fits both scorers on the training part of every fold and stores their validation and test probabilities."""
-    X, _ = geometric_features(D, P, workers, log)
-    for k in range(D.n_folds):
-        tr, va, te = bd.split(D, k)
-        mode = class_counts(D.item[tr], D.score[tr]).argmax(1)
-        onehot = lambda idx: np.eye(N_CLS, dtype=np.float32)[mode[D.item[idx]]]
-        out = {'majority': (onehot(va), onehot(te)), 'geometric_gb': tuple(_boosting_probs(X, tr, [va, te], D))}
-        for key, (q_va, q_te) in out.items():
-            path = os.path.join(P.runs, key, f'fold{k}.npz')
-            atomic_save(path, lambda p: np.savez(p, va_idx=va, te_idx=te, q_va=q_va, q_te=q_te,
-                                                 signature=json.dumps({'scorer': key, 'fold': k, 'seed': SEED})))
-    log(f'Feature-based scorers fitted on {D.n_folds} folds ({X.shape[1]} geometric features)')
+def table(G, P=None):
+    """Name, group, description and the median and range of every feature."""
+    rows = [{'Feature': k, 'Group': g, 'Description': d, 'Median': G[k].median(), '5th percentile': G[k].quantile(0.05),
+             '95th percentile': G[k].quantile(0.95)} for k, (g, d) in FEATURES.items()]
+    t = pd.DataFrame(rows).set_index('Feature')
+    if P is not None:
+        save_csv(t, os.path.join(P.data, 'feature_dictionary.csv'))
+    return t.round(3)

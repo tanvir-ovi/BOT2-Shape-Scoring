@@ -11,48 +11,70 @@
 </div>
 
 This repository scores the eight shape-drawing items of the Bruininks-Oseretsky Test of Motor Proficiency, Second
-Edition (BOT-2) with image networks and feature-based scorers, and evaluates every scorer with the same five-fold
+Edition (BOT-2) with three paradigms: rules that apply the BOT-2 rubric to OpenCV measurements, machine-learning
+classifiers on 64 OpenCV geometric features, and deep networks. Every scorer is evaluated with the same five-fold
 cross-validation, in which all drawings of a child stay in one fold. The proposed scorer, DPE, averages the score
-probabilities of three backbones pretrained on different image sources: supervised natural images at 512 pixels,
+probabilities of three networks pretrained on different image sources: supervised natural images at 512 pixels,
 self-supervised natural images, and self-supervised scanned documents.
 
 
 <h2 style="border-bottom: 1px solid lightgray; margin-bottom: 5px;">Scorers</h2>
 
-| Role | Scorer | Pretraining | Input |
-|---|---|---|---|
-| Proposed | **DPE**, mean of the score probabilities of the three members | | |
-| Member | ConvNeXt V2-T | FCMAE, then ImageNet-22k and ImageNet-1k | 512 px |
-| Member | DINOv2 ViT-L/14 with registers | self-supervised, LVD-142M | 336 px |
-| Member | DiT-B | self-supervised, 42M scanned document pages | 224 px |
-| Baseline | ResNet-50 | ImageNet-1k | 384 px |
-| Baseline | EfficientNetV2-S | ImageNet-21k and ImageNet-1k | 384 px |
-| Baseline | ViT-B/16 | ImageNet-21k and ImageNet-1k | 224 px |
-| Baseline | CViT, Xception and ViT-B/16 features concatenated | ImageNet | 299 and 224 px |
-| Control | BEiT-B | ImageNet-22k | 224 px |
-| Control | BEiT-B | ImageNet-22k, then QuickDraw sketches | 224 px |
-| Control | ConvNeXt V2-T | as the member | 224 px |
-| Feature-based | Most frequent training score of each item | | |
-| Feature-based | Gradient boosting on 64 geometric descriptors | | |
+| Paradigm | Scorer | Input and pretraining |
+|---|---|---|
+| Deep learning, proposed | **DPE**, mean of the score probabilities of its three members | |
+| Deep learning, member | ConvNeXt V2-T | 512 px; FCMAE, then ImageNet-22k and ImageNet-1k |
+| Deep learning, member | DINOv2 ViT-L/14 with registers | 336 px; self-supervised, LVD-142M |
+| Deep learning, member | DiT-B | 224 px; self-supervised, 42 million scanned document pages |
+| Deep learning, baseline | ResNet-50 | 384 px; ImageNet-1k |
+| Deep learning, baseline | MobileNetV3-Large | 384 px; ImageNet-1k |
+| Deep learning, baseline | EfficientNetV2-S | 384 px; ImageNet-21k, then ImageNet-1k |
+| Deep learning, baseline | ViT-B/16 | 224 px; ImageNet-21k, then ImageNet-1k |
+| Deep learning, baseline | CViT, Xception and ViT-B/16 features concatenated | 299 and 224 px; ImageNet |
+| Deep learning, control | BEiT-B | 224 px; ImageNet-22k |
+| Deep learning, control | BEiT-B | 224 px; ImageNet-22k, then QuickDraw sketches |
+| Deep learning, control | ConvNeXt V2-T | 224 px; as the member |
+| Machine learning | Gradient boosting, random forest, SVM with an RBF kernel, logistic regression | 64 OpenCV features |
+| Rule-based | OpenCV rubric rules | OpenCV measurements |
+| Reference | Most frequent training score of each item | |
 
-All networks share one head (layer normalisation and one linear score head per item) and one recipe: cross-entropy
-with label smoothing of 0.05, natural sampling, AdamW with linear warm-up and cosine decay, an exponential moving
-average of the weights, and early stopping on validation accuracy. A run whose validation predictions collapse to the
-most frequent score is restarted at half the learning rate. The predicted score is the most probable valid score of
-the item, and no threshold or prior correction is tuned.
+**Networks.** All networks share one head (layer normalisation and one linear score head per item) and one recipe:
+cross-entropy with label smoothing of 0.05, natural sampling, AdamW with linear warm-up and cosine decay, an
+exponential moving average of the weights, and early stopping on validation accuracy. A run whose validation predictions
+collapse to the most frequent score of every item is restarted at half the learning rate, at most twice. The predicted
+score is the most probable valid score of the item; no threshold or prior correction is tuned. `models.recipe()` lists
+every setting.
+
+**OpenCV features.** The pencil stroke is separated from the scanned page, and 64 measurements are taken from it:
+size and position, enclosed regions and overlap, symmetry, contour shape, angles and corners, points, crossings,
+closure (overshoot tails, gaps between free stroke ends) and stroke quality. `features.table()` describes each one.
+
+**Machine-learning classifiers.** One model per item, fitted on the training part of each fold with hyperparameters
+fixed in advance. Each predicts the most probable score.
+
+**Rubric rules.** Each criterion of each item (basic shape, closure, edges, orientation, overlap, overall size) is
+judged by one OpenCV measurement against a cut-off. The item score is the number of criteria passed, or 0 when the
+basic shape fails, as the rubric prescribes. Each cut-off is set on the training drawings of the fold, where it agrees
+best (Cohen's kappa) with the examiner's mark for that criterion, read from the file name.
 
 
 <h2 style="border-bottom: 1px solid lightgray; margin-bottom: 5px;">Protocol</h2>
 
 - 4,296 drawings of 664 children inferred from the image numbering. Byte-identical files with conflicting scores are
   excluded.
-- Five folds, stratified by item and score and grouped by inferred child. Within each fold, one eighth of the training
-  children form the validation set, which is used only to select the checkpoint.
-- One training seed (2026). Every network uses the same folds, seed and schedule.
-- Each drawing is scored once, by the models of the fold that held it out.
+- Five folds, stratified by item and score and grouped by inferred child. In each fold, the test part is the held-out
+  fold; one eighth of the remaining children form the validation part and the rest the training part.
+- The training part fits every scorer. The validation part only selects the checkpoint of a network and, for the
+  comparison of paradigms, the network and the classifier with the best validation accuracy in that fold. The test part
+  is scored once, after training.
+- Every drawing is therefore scored once, by scorers that never saw its child. All reported numbers are these
+  out-of-fold test predictions. One training seed (2026) is used for every network.
+- Accuracy is the mean of the eight item accuracies. Agreement with the expert is reported as Cohen's kappa and
+  quadratic weighted kappa on the full score scale of each item, with the Landis and Koch bands.
 - Paired comparisons use the same drawings for both scorers. Intervals come from 10,000 bootstrap resamples of
   children, and p values from a child-level sign-flip permutation test. The Holm correction is applied within each
-  family of comparisons, and the equivalence margin is one accuracy point.
+  family of comparisons (paradigms, the proposed ensemble against every scorer, the ensemble without one member,
+  pretraining source and input size), and the equivalence margin is one accuracy point.
 
 
 <h2 style="border-bottom: 1px solid lightgray; margin-bottom: 5px;">Environment setup</h2>
@@ -76,29 +98,26 @@ start of every run.
 <h2 style="border-bottom: 1px solid lightgray; margin-bottom: 5px;">Running</h2>
 
 1. Put `Shapes.zip` in a Google Drive folder, and copy this repository into a subfolder named `final` next to it.
-2. Open `BOT2_5Fold_CV.ipynb` in Colab with an A100 runtime and run all cells. `DRIVE_DIR` in the setup cell is the
-   folder that holds `Shapes.zip`. This notebook alone trains the 50 network-fold units in about five hours.
-3. To finish in about two hours, also open `helpers/BOT2_Helper_1.ipynb` and `helpers/BOT2_Helper_2.ipynb`, each in
-   its own tab with its own A100 runtime, and run all cells in the three notebooks at about the same time. Each helper
-   trains its third of the units and then releases its runtime. The main notebook trains its own third, takes over the
-   units of a helper that stops or never starts, waits for running helpers and then runs the analysis. No setting has
-   to be changed in any notebook.
-4. Finished units are skipped when a notebook is run again, so an interrupted run resumes where it stopped. Every
-   runtime is released at the end of its run and after any error.
+   `DRIVE_DIR` in the setup cell is the folder that holds `Shapes.zip`.
+2. Open `BOT2_5Fold_CV.ipynb` in Colab with an A100 runtime and run all cells. The 55 network-fold units take about
+   six hours. The training cell prints the training loss, training accuracy, validation accuracy and validation QWK of
+   every epoch, and the test accuracy of every fold.
+3. If the runtime stops, run all cells again: finished units are skipped, and their stored epoch logs are printed
+   in their place. The runtime is released after the last cell and after any error.
 
 
 <h2 style="border-bottom: 1px solid lightgray; margin-bottom: 5px;">Outputs</h2>
 
 | Folder | Content |
 |---|---|
-| `results/data` | index of the drawings with their fold, excluded files, input cache, geometric descriptors |
-| `results/runs` | per network and fold: validation and test probabilities, test embeddings, training history, weights |
+| `results/data` | index of the drawings with their fold, excluded files, score and criterion tables, OpenCV features, input cache |
+| `results/runs` | per scorer and fold: validation and test probabilities; for networks also test embeddings, the epoch log and the weights of the ensemble members |
 | `results/predictions` | out-of-fold predicted score and probabilities of every scorer for every drawing |
-| `results/metrics` | summary, accuracy per item and per fold, precision, recall and F1 per item, confusion matrices, precision-recall data, embedding separation, weight verification |
+| `results/metrics` | summary, agreement, accuracy per item and per fold, metrics per item, confusion matrices, rule cut-offs and criterion agreement, training summary, paradigm selection, precision-recall data, embedding separation, weight verification |
 | `results/statistics` | paired comparisons with intervals, permutation and McNemar p values, Holm-adjusted p values and verdicts |
 | `results/embeddings` | out-of-fold embeddings of every network and t-SNE coordinates |
 | `results/figures` | figures as vector PDF at IEEE column or text width |
-| `results/logs` | run logs, software versions and code checksums |
+| `results/logs` | run log, software versions and code checksums |
 | `results/manifest_sha256.csv` | SHA-256 checksum of every result file |
 
 `verify.check_weights` rebuilds every saved network from its weight file, predicts its test fold again and compares
