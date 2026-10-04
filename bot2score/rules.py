@@ -1,8 +1,7 @@
 """OpenCV rubric rules. Every criterion of every item is judged by one geometric measurement compared with a cut-off,
 and the item score is the number of criteria passed, or 0 when the basic shape fails, as the BOT-2 rubric prescribes.
-The cut-off of a criterion is set on the training drawings of each fold, where the rule agrees most often with the
-examiner's mark for that criterion; when no cut-off agrees more often than passing every drawing, the criterion always
-passes."""
+The cut-off of a criterion is set on the training drawings of each fold, where it agrees best (Cohen's kappa) with the
+examiner's mark for that criterion; when no cut-off agrees beyond chance, the criterion always passes."""
 import os
 import itertools
 
@@ -93,22 +92,17 @@ def criterion_pass(M, rows, rule, cut):
     return v >= c if direction == 'min' else v <= c
 
 
-def _agreement(y, passed):
-    return float(np.mean(np.asarray(passed, int) == y)) if len(y) else 0.0
-
-
 def fit_cut(M, rows, y, rule):
-    """Cut-off with which the rule agrees most often with the examiner's marks y on the training rows. Candidates run
-    from lenient to strict, so a tie keeps the more lenient cut-off, and the cut-off that never fails is kept unless a
-    candidate agrees more often. Returns the cut-off, its kappa and its agreement on the training rows."""
-    everyone = np.ones(len(y), bool)
+    """Cut-off with the highest kappa against the examiner's marks y on the training rows. Candidates run from lenient
+    to strict, so a tie keeps the more lenient cut-off; the never-failing cut-off is kept unless a candidate exceeds a
+    kappa of 0."""
     if rule == CLOSURE:
-        best, best_a = (np.inf, np.inf, np.inf), _agreement(y, everyone)
+        best, best_k = (np.inf, np.inf, np.inf), 0.0
         for cut in CLOSURE_GRID:
-            a = _agreement(y, _closure_pass(M, rows, cut))
-            if a > best_a + 1e-12:
-                best, best_a = cut, a
-        return best, binary_kappa(y, _closure_pass(M, rows, best)), best_a
+            k = binary_kappa(y, _closure_pass(M, rows, cut))
+            if k > best_k + 1e-12:
+                best, best_k = cut, k
+        return best, best_k
     col, direction = rule
     v = M[col].values[rows]
     ref = float(np.median(v[y == 1])) if direction == 'typical' and (y == 1).any() else 0.0
@@ -119,13 +113,12 @@ def fit_cut(M, rows, y, rule):
         best = (-np.inf, ref)
     else:
         best, cands = (np.inf, ref), cands[::-1]
-    best_a = _agreement(y, everyone)
+    best_k = 0.0
     for c in cands:
-        a = _agreement(y, v >= c if direction == 'min' else v <= c)
-        if a > best_a + 1e-12:
-            best, best_a = (float(c), ref), a
-    passed = v >= best[0] if direction == 'min' else v <= best[0]
-    return best, binary_kappa(y, passed), best_a
+        k = binary_kappa(y, v >= c if direction == 'min' else v <= c)
+        if k > best_k + 1e-12:
+            best, best_k = (float(c), ref), k
+    return best, best_k
 
 
 def score(M, D, idx, cuts):
@@ -176,15 +169,14 @@ def run(D, G, P, log=print):
         for i, s in enumerate(ITEMS):
             for c in FACETS[s]:
                 rows, y = _training_rows(D, tr, i, c)
-                cut, kap, agree = fit_cut(M, rows, y, RULES[s][c])
+                cut, kap = fit_cut(M, rows, y, RULES[s][c])
                 cuts[(s, c)] = cut
                 rule = RULES[s][c]
                 rows_out.append({'Item': ITEM_LABEL[s], 'Criterion': CRITERION_LABEL[c], 'Fold': k,
                                  'Measurement': 'closure' if rule == CLOSURE else rule[0],
                                  'Direction': 'closure' if rule == CLOSURE else rule[1],
                                  'Cut-off': _cut_text(rule, cut), 'Training drawings': len(y),
-                                 'Training failures': int((y == 0).sum()), 'Training agreement (%)': 100 * agree,
-                                 'Training kappa': kap})
+                                 'Training failures': int((y == 0).sum()), 'Training kappa': kap})
         q_va, _ = score(M, D, va, cuts)
         q_te, crit_te = score(M, D, te, cuts)
         atomic_save(os.path.join(P.runs, 'rules', f'fold{k}.npz'), lambda p: np.savez(
@@ -200,16 +192,15 @@ def run(D, G, P, log=print):
 
 
 def rule_table(t):
-    """One row per item and criterion: the measurement, its rule, the cut-off set in every fold, and the mean
-    agreement and kappa of the rule with the examiner on the training drawings."""
+    """One row per item and criterion: the measurement, its rule, the cut-off set in every fold and the mean kappa
+    of the rule on the training drawings."""
     rows = []
     for (item, crit), g in t.groupby(['Item', 'Criterion'], sort=False):
         first = g.iloc[0]
         row = {'Item': item, 'Criterion': crit, 'Measurement': MEASUREMENT[first['Measurement']],
                'Rule': DIRECTION[first['Direction']]}
         row.update({f'Fold {k}': c for k, c in zip(g['Fold'], g['Cut-off'])})
-        row['Training agreement (%)'] = g['Training agreement (%)'].mean()
-        row['Training kappa'] = g['Training kappa'].mean()
+        row['Training kappa (mean)'] = g['Training kappa'].mean()
         rows.append(row)
     return pd.DataFrame(rows).set_index(['Item', 'Criterion']).round(3)
 

@@ -54,9 +54,8 @@ fixed in advance. Each predicts the most probable score.
 
 **Rubric rules.** Each criterion of each item (basic shape, closure, edges, orientation, overlap, overall size) is
 judged by one OpenCV measurement against a cut-off. The item score is the number of criteria passed, or 0 when the
-basic shape fails, as the rubric prescribes. Each cut-off is set on the training drawings of the fold, where the rule
-agrees most often with the examiner's mark for that criterion, read from the file name. A criterion whose measurement
-cannot do better than passing every drawing always passes.
+basic shape fails, as the rubric prescribes. Each cut-off is set on the training drawings of the fold, where it agrees
+best (Cohen's kappa) with the examiner's mark for that criterion, read from the file name.
 
 
 <h2 style="border-bottom: 1px solid lightgray; margin-bottom: 5px;">Protocol</h2>
