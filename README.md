@@ -77,12 +77,14 @@ start of every run.
 
 1. Put `Shapes.zip` in a Google Drive folder, and copy this repository into a subfolder named `final` next to it.
 2. Open `BOT2_5Fold_CV.ipynb` in Colab with an A100 runtime and run all cells. `DRIVE_DIR` in the setup cell is the
-   folder that holds `Shapes.zip`.
-3. One runtime trains the 50 network-fold units in about five hours. To use three runtimes at once, open the notebook
-   in three tabs with `N_WORKERS = 3` and `WORKER = 0`, `1` and `2`. Worker 0 waits for the others, takes over the
-   units of a worker that stops, and runs the analysis.
-4. Finished units are skipped when the notebook is run again, so an interrupted run resumes where it stopped. The
-   runtime is released at the end of the run and after any error.
+   folder that holds `Shapes.zip`. This notebook alone trains the 50 network-fold units in about five hours.
+3. To finish in about two hours, also open `helpers/BOT2_Helper_1.ipynb` and `helpers/BOT2_Helper_2.ipynb`, each in
+   its own tab with its own A100 runtime, and run all cells in the three notebooks at about the same time. Each helper
+   trains its third of the units and then releases its runtime. The main notebook trains its own third, takes over the
+   units of a helper that stops or never starts, waits for running helpers and then runs the analysis. No setting has
+   to be changed in any notebook.
+4. Finished units are skipped when a notebook is run again, so an interrupted run resumes where it stopped. Every
+   runtime is released at the end of its run and after any error.
 
 
 <h2 style="border-bottom: 1px solid lightgray; margin-bottom: 5px;">Outputs</h2>

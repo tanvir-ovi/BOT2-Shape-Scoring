@@ -361,18 +361,28 @@ def _heartbeat(P, worker):
         pass
 
 
-def _heartbeat_age(P, worker, since):
-    path = os.path.join(P.logs, f'worker{worker}.json')
+def _heartbeat_age(P, worker):
+    """Seconds since the worker last wrote its heartbeat; infinite if it never started."""
     try:
-        return time.time() - load_json(path)['updated']
+        return time.time() - load_json(os.path.join(P.logs, f'worker{worker}.json'))['updated']
     except Exception:
-        return time.time() - since
+        return float('inf')
 
 
-def run(D, P, keys=None, worker=0, n_workers=1, save='ensemble', stale_minutes=20, cfgs=None, pretrained=True,
-        max_steps=None, device=None, log=print):
-    """Trains every unit assigned to this worker that is not finished. Worker 0 then waits for the other workers and
-    takes over units whose worker stopped sending heartbeats."""
+def _busy(P, u, stale_minutes):
+    """True while another runtime is training this unit."""
+    try:
+        st = load_json(unit_paths(P, *u).status)
+    except Exception:
+        return False
+    return (st.get('state') == 'running' and st.get('host') != socket.gethostname()
+            and time.time() - st.get('updated', 0) < stale_minutes * 60)
+
+
+def run(D, P, keys=None, worker=0, n_workers=1, save='ensemble', stale_minutes=20, poll_seconds=60, cfgs=None,
+        pretrained=True, max_steps=None, device=None, log=print):
+    """Trains every unit assigned to this worker that is not finished. Worker 0 then trains the units of helper
+    workers that never started or stopped, retries failed units once, and waits for running helpers to finish."""
     keys = list(keys or NETWORKS)
     cfgs = cfgs or {}
     units, owner = plan(keys, D.n_folds, n_workers)
@@ -380,6 +390,12 @@ def run(D, P, keys=None, worker=0, n_workers=1, save='ensemble', stale_minutes=2
     def finished(u):
         cfg = dict(cfgs.get(u[0], NETWORKS[u[0]]))
         return unit_done(unit_paths(P, *u), signature(u[0], cfg, D, u[1]))
+
+    def state(u):
+        try:
+            return load_json(unit_paths(P, *u).status).get('state')
+        except Exception:
+            return None
 
     def attempt(u):
         key, k = u
@@ -396,41 +412,43 @@ def run(D, P, keys=None, worker=0, n_workers=1, save='ensemble', stale_minutes=2
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-    mine = [u for u in units if owner[u] == worker]
-    todo = [u for u in mine if not finished(u)]
-    minutes = sum(MINUTES_PER_FOLD.get(key, 5) for key, _ in todo)
-    log(f'Worker {worker} of {n_workers}: {len(mine)} units assigned, {len(mine) - len(todo)} finished, '
-        f'about {minutes / 60:.1f} h of A100 time left')
+    todo = [u for u in units if owner[u] == worker and not finished(u)]
+    total = sum(MINUTES_PER_FOLD.get(key, 5) for key, k in units if not finished((key, k)))
+    log(f'Worker {worker} of {n_workers}: {len(todo)} network-fold units to train here; '
+        f'about {total / 60:.1f} h of A100 time left in total')
     if worker == 0 and 'convnext_512' in keys:
         pretrained_embedding(D, P, 'convnext_512', cfg=cfgs.get('convnext_512'), pretrained=pretrained, device=device,
                              log=log)
+    _heartbeat(P, worker)
     for u in todo:
+        if _busy(P, u, stale_minutes):
+            log(f'{u[0]} fold {u[1]} is being trained in another runtime')
+            continue
         attempt(u)
     _heartbeat(P, worker)
 
-    def state(u):
-        try:
-            return load_json(unit_paths(P, *u).status).get('state')
-        except Exception:
-            return None
-
-    if worker == 0:                               # one retry of failed units; takeover of units of stopped workers
-        since, retried = time.time(), set()
+    if worker == 0:
+        retried, reported = set(), set()
         while True:
             pending = [u for u in units if not finished(u)]
-            ages = {w: _heartbeat_age(P, w, since) for w in range(1, n_workers)}
-            takeover = [u for u in pending if u not in retried and
-                        (owner[u] == 0 or state(u) == 'failed' or ages[owner[u]] > stale_minutes * 60)]
+            alive = {w: _heartbeat_age(P, w) < stale_minutes * 60 for w in range(1, n_workers)}
+            for w in sorted(w for w, a in alive.items() if not a and w not in reported and
+                            any(owner[u] == w for u in pending)):
+                log(f'Worker {w} is not running; its units are trained here')
+                reported.add(w)
+            takeover = [u for u in pending if u not in retried and not _busy(P, u, stale_minutes) and
+                        (owner[u] == 0 or state(u) == 'failed' or not alive[owner[u]])]
             if takeover:
                 for u in takeover:
-                    if not finished(u):
-                        log(f'Retrying {u[0]} fold {u[1]}' if owner[u] == 0 else f'Worker 0 takes over {u[0]} fold {u[1]}')
+                    if not finished(u) and not _busy(P, u, stale_minutes):
+                        if state(u) == 'failed':
+                            log(f'Retrying {u[0]} fold {u[1]}')
                         retried.add(u)
                         attempt(u)
                 continue
             if not pending or all(u in retried for u in pending):
                 break
-            time.sleep(60)
+            time.sleep(poll_seconds)
     return progress(P, D, keys, cfgs)
 
 
