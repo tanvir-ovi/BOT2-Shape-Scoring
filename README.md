@@ -21,10 +21,10 @@ stay in one of five folds, and the scorers are compared with child-level statist
 synthetic.</p>
 
 In the Fine Motor Integration subtest of the Bruininks-Oseretsky Test of Motor Proficiency, Second Edition (BOT-2), a
-child copies eight shapes and an examiner scores each copy against rubric criteria such as closure, edges and
-orientation. This repository automates that scoring and compares three ways to do it on the same child-grouped folds.
-The proposed scorer, the **Diverse-Pretraining Ensemble (DPE)**, averages the score distributions of three networks
-pretrained on labelled photos, unlabelled photos and document scans.
+child copies eight shapes. An examiner scores each copy against rubric criteria such as closure, edges and
+orientation. This repository automates that scoring. It compares three ways to do it on the same child-grouped folds.
+The proposed scorer is the **Diverse-Pretraining Ensemble (DPE)**. It averages the score distributions of three
+networks pretrained on labelled photos, unlabelled photos and document scans.
 
 
 <h2 style="border-bottom: 1px solid lightgray; margin-bottom: 5px;">News</h2>
@@ -41,9 +41,9 @@ pretrained on labelled photos, unlabelled photos and document scans.
 
 <p align="center"><b>DPE, from the ink map to the predicted score.</b> Three encoders with different pretraining read
 the ink map at their own input size. In each member, the feature passes through layer normalisation, dropout and a
-linear layer to logits for the 8 shapes and 7 scores. The shape index selects the row of the drawing's shape, scores
-above its maximum are masked, and a softmax gives the score distribution. DPE averages the three distributions and
-predicts the most probable valid score. The average has no trainable weights.</p>
+linear layer. This gives logits for the 8 shapes and 7 scores. The shape index selects the row of the drawing's shape,
+and scores above its maximum are masked. A softmax then gives the score distribution. DPE averages the three
+distributions and predicts the most probable valid score. The average has no trainable weights.</p>
 
 For a drawing $x$ of shape $i$ with maximum score $K_i$, member $m$ gives $p_m(k \mid x, i)$ over $k = 0, \dots, K_i$, and
 
@@ -56,11 +56,11 @@ $$\bar{p}(k \mid x, i) = \frac{1}{3}\sum_{m=1}^{3} p_m(k \mid x, i), \qquad \hat
 | Rubric rules | one measurement and one cut-off per criterion, and the score is the number of criteria passed, or 0 if the basic shape fails | OpenCV measurements |
 | Reference | most frequent training score of each shape | shape only |
 
-All networks share one score head and one recipe: label-smoothed cross-entropy (0.05), natural sampling, AdamW with
-warm-up and cosine decay, an exponential moving average of the weights and early stopping on validation accuracy. A
-run whose validation predictions collapse to the most frequent score restarts at half the learning rate, at most
-twice. Each rule cut-off is set on the training drawings of the fold, where Cohen's kappa with the examiner's mark for
-that criterion is highest. `models.recipe()`, `features.table()` and the rule table of the notebook list every setting.
+All networks share one score head and one recipe. They train with label-smoothed cross-entropy (0.05) at natural
+sampling, and AdamW with warm-up and cosine decay. The evaluated weights are an exponential moving average, and early
+stopping follows validation accuracy. A run whose validation predictions collapse to the most frequent score restarts
+at half the learning rate, at most twice. Each rule cut-off is set on the training drawings of the fold, where Cohen's
+kappa with the examiner's mark for that criterion is highest. `models.recipe()`, `features.table()` and the rule table of the notebook list every setting.
 
 
 <h2 style="border-bottom: 1px solid lightgray; margin-bottom: 5px;">Results</h2>
