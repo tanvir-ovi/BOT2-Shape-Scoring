@@ -6,7 +6,7 @@
   <a href='LICENSE'><img src='https://img.shields.io/badge/License-MIT-green.svg'></a>
   <img src='https://img.shields.io/badge/Python-3.10%2B-3776AB.svg'>
   <img src='https://img.shields.io/badge/PyTorch-2.3%2B-EE4C2C.svg'>
-  <img src='https://img.shields.io/badge/Protocol-child--grouped%205--fold%20CV-5E9E68.svg'>
+  <img src='https://img.shields.io/badge/Protocol-grouped%205--fold%20CV-5E9E68.svg'>
 </p>
 
 </div>
@@ -16,21 +16,15 @@
 </p>
 
 <p align="center"><b>Overview.</b> Each drawing becomes an ink map for the networks and a stroke mask for OpenCV. Deep
-networks, classifiers on 64 geometric measurements and rubric rules predict the BOT-2 score. All drawings of a child
-stay in one of five folds, and the scorers are compared with child-level statistics. The drawings shown are
-synthetic.</p>
+networks, classifiers on 64 geometric measurements and rubric rules predict the BOT-2 score. Consecutively numbered
+drawings stay together in one of five folds, and the scorers are compared with paired statistics. The drawings shown
+are synthetic.</p>
 
 In the Fine Motor Integration subtest of the Bruininks-Oseretsky Test of Motor Proficiency, Second Edition (BOT-2), a
 child copies eight shapes. An examiner scores each copy against rubric criteria such as closure, edges and
-orientation. This repository automates that scoring. It compares three ways to do it on the same child-grouped folds.
+orientation. This repository automates that scoring. It compares three ways to do it on the same five folds.
 The proposed scorer is the **Diverse-Pretraining Ensemble (DPE)**. It averages the score distributions of three
 networks pretrained on labelled photos, unlabelled photos and document scans.
-
-
-<h2 style="border-bottom: 1px solid lightgray; margin-bottom: 5px;">News</h2>
-
-- **2026-10-05**: manuscript and figures prepared in CVPR format.
-- **2026-10-04**: five-fold run finished. Every number below is an out-of-fold result of that run.
 
 
 <h2 style="border-bottom: 1px solid lightgray; margin-bottom: 5px;">Method</h2>
@@ -65,9 +59,10 @@ kappa with the examiner's mark for that criterion is highest. `models.recipe()`,
 
 <h2 style="border-bottom: 1px solid lightgray; margin-bottom: 5px;">Results</h2>
 
-4296 drawings of 664 children, five child-grouped folds, every drawing scored once out of fold. Acc is the mean
-accuracy over the eight shapes, and kappa and QWK are computed per shape on its full score scale. AP ranks the drawings
-below full marks.
+4296 drawings, five folds stratified by shape and score, every drawing scored once out of fold. The file names do not
+identify participants, so `data.build_index` groups consecutively numbered drawings into 664 blocks (the `child` column
+in the code) and keeps each block in one fold. Acc is the mean accuracy over the eight shapes, and kappa and QWK are
+computed per shape on its full score scale. AP ranks the drawings below full marks.
 
 | Scorer | Acc (%) | Cohen's κ | QWK | MAE | AP |
 |---|:---:|:---:|:---:|:---:|:---:|
@@ -90,7 +85,7 @@ below full marks.
 | Logistic regression | 75.27 | 0.262 | 0.253 | 0.318 | 0.698 |
 | OpenCV rubric rules | 51.63 | 0.104 | 0.117 | 0.859 | 0.353 |
 
-- After Holm correction DPE was more accurate than each of the other 17 scorers (paired child-level permutation tests,
+- After Holm correction DPE was more accurate than each of the other 17 scorers (paired block-level permutation tests,
   adjusted p ≤ 0.045). Its margin over its strongest member was 0.74 points (95% interval 0.01 to 1.47).
 - Without DiT-B the ensemble was equivalent to DPE within one point (83.67%) with a higher kappa (0.534). Document
   pretraining was 1.64 points less accurate than photo pretraining on the same BEiT-B architecture.
@@ -130,7 +125,7 @@ every run.
 ```
 BOT2_5Fold_CV.ipynb      the whole study in one notebook
 bot2score/
-  data.py                shapes and rubric criteria, archive index, ink maps, child-grouped folds
+  data.py                shapes and rubric criteria, archive index, ink maps, grouped folds
   features.py            stroke mask and the 64 OpenCV measurements
   rules.py               rubric rules with one cut-off per criterion and fold
   classical.py           logistic regression, SVM, random forest, gradient boosting, most frequent score
@@ -138,7 +133,7 @@ bot2score/
   training.py            fine-tuning, collapse restarts, epoch logs, embeddings
   scorers.py             names, paradigms and roles of all scorers
   metrics.py             accuracy, kappa and QWK on the full score scale
-  evaluation.py          out-of-fold predictions, agreement, paired child-level statistics, t-SNE analysis
+  evaluation.py          out-of-fold predictions, agreement, paired block-level statistics, t-SNE analysis
   figures.py             vector PDF figures
   verify.py              re-prediction from the saved weights and SHA-256 manifest
   utils.py               result folders, logging, Colab runtime control
